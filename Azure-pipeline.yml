@@ -1,0 +1,123 @@
+trigger:
+  - main
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  - group: "vercel-migration-secrets"
+
+stages:
+
+# =======================================================
+# BUILD STAGE — Build Next.js standalone bundle
+# =======================================================
+- stage: Build
+  displayName: "Build Standalone Next.js App"
+  jobs:
+    - job: BuildJob
+      displayName: "Build & Package"
+      steps:
+
+        # Install Node.js 20
+        - task: NodeTool@0
+          inputs:
+            versionSpec: "20.x"
+          displayName: "Install Node.js 20"
+
+        # Install dependencies
+        - script: |
+            npm install
+          displayName: "Install Dependencies"
+
+        # Build Next.js App
+        - script: |
+            npm run build
+          displayName: "Build Next.js (Standalone)"
+
+        # Prepare deployment folder
+        - script: |
+            echo "Preparing standalone deployment folder..."
+
+            rm -rf deploy
+            mkdir deploy
+
+            # Copy standalone server bundle
+            cp -R .next/standalone/* deploy/
+
+            # Copy static assets
+            mkdir -p deploy/.next
+            cp -R .next/static deploy/.next/static
+
+            # Copy public folder
+            cp -R public deploy/public
+
+            # Copy package.json (for Node runtime)
+            cp package.json deploy/
+
+            # Ensure server.js exists
+            cp .next/standalone/server.js deploy/server.js
+
+            echo "Deployment folder:"
+            ls -al deploy
+          displayName: "Prepare Deployment Folder"
+
+        # Archive deployment
+        - task: ArchiveFiles@2
+          inputs:
+            rootFolderOrFile: "$(Build.SourcesDirectory)/deploy"
+            includeRootFolder: false
+            archiveType: "zip"
+            archiveFile: "$(Build.ArtifactStagingDirectory)/app.zip"
+            replaceExistingArchive: true
+          displayName: "Create Deployment ZIP"
+
+        # Publish artifact
+        - task: PublishBuildArtifacts@1
+          inputs:
+            pathToPublish: "$(Build.ArtifactStagingDirectory)"
+            artifactName: "drop"
+          displayName: "Publish Artifact"
+
+
+# =======================================================
+# DEPLOY STAGE — App Service Deployment
+# =======================================================
+- stage: Deploy
+  dependsOn: Build
+  displayName: "Deploy to Azure App Service"
+  jobs:
+    - deployment: DeployJob
+      displayName: "Deploy to Azure"
+      environment: "dev"
+
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+
+              - download: current
+                artifact: drop
+                displayName: "Download Build Artifact"
+
+              # Configure environment settings
+              - task: AzureAppServiceSettings@1
+                displayName: "Apply App Settings"
+                inputs:
+                  azureSubscription: "vercel-opeyemi"
+                  appName: "migration-project-app"
+                  appSettings: |
+                    [
+                      { "name": "DATABASE_URL", "value": "$(DATABASE_URL)", "slotSetting": false },
+                      { "name": "WEBSITE_RUN_FROM_PACKAGE", "value": "0", "slotSetting": false }
+                    ]
+
+              # Deploy ZIP to Azure App Service
+              - task: AzureWebApp@1
+                displayName: "Deploy Next.js App ZIP"
+                inputs:
+                  azureSubscription: "vercel-opeyemi"
+                  appType: "webAppLinux"
+                  appName: "migration-project-app"
+                  package: "$(Pipeline.Workspace)/drop/app.zip"
+                  runtimeStack: "NODE|20-lts"
